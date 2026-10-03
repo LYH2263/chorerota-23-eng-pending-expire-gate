@@ -13,8 +13,8 @@
     <ul class="list">
       <li v-for="s in rows" :key="s.id">
         #{{ s.id }} D{{ s.a_day }}/T{{ s.a_task }} ↔ D{{ s.b_day }}/T{{ s.b_task }}
-        <span class="chip" :class="{ coral: s.status==='pending' }">{{ s.status }}</span>
-        <button v-if="s.status==='pending'" style="margin-left:8px" @click="confirm(s.id)">确认改表</button>
+        <span class="chip" :class="{ coral: s.status==='pending', expired: s.status==='expired' }">{{ s.status }}</span>
+        <button v-if="canConfirm(s)" style="margin-left:8px" @click="confirm(s.id)">确认改表</button>
       </li>
     </ul>
   </div>
@@ -25,6 +25,8 @@ import { api } from '../api'
 const rows = ref([])
 const err = ref('')
 const form = ref({ a_day: 0, a_task: 1, b_day: 1, b_task: 1 })
+// 与后端同一口径：能否确认只看库内 status 标记（stored flag），前端不按本地时钟自行推断过期
+const canConfirm = s => s.status === 'pending'
 async function load() { rows.value = await api('/swaps') }
 async function request() {
   err.value = ''

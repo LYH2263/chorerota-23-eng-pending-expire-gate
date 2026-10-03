@@ -94,11 +94,27 @@ def request_swap(week_id: int, body: SwapBody):
 def list_swaps():
     c = connect(); rows = [dict(r) for r in c.execute("SELECT * FROM swap_requests ORDER BY id DESC")]; c.close(); return rows
 
+@app.post("/api/swaps/{swap_id}/expire")
+def expire_swap(swap_id: int):
+    """Mark a pending swap expired. Expiry semantics: the stored `status` flag is
+    the single source of truth (not a confirm-time clock); the frontend reads the
+    same field, so both sides share one 口径."""
+    c = connect()
+    sw = c.execute("SELECT * FROM swap_requests WHERE id=?", (swap_id,)).fetchone()
+    if not sw: c.close(); raise HTTPException(404, "swap not found")
+    if sw["status"] != "pending":
+        c.close(); raise HTTPException(400, "not_pending")
+    c.execute("UPDATE swap_requests SET status='expired' WHERE id=?", (swap_id,))
+    c.commit(); c.close()
+    return {"ok": True, "swap_id": swap_id, "status": "expired"}
+
 @app.post("/api/swaps/{swap_id}/confirm")
 def confirm_swap(swap_id: int):
     c = connect()
     sw = c.execute("SELECT * FROM swap_requests WHERE id=?", (swap_id,)).fetchone()
     if not sw: c.close(); raise HTTPException(404, "swap not found")
+    if sw["status"] == "expired":
+        c.close(); raise HTTPException(400, "swap_expired")
     if sw["status"] != "pending":
         c.close(); raise HTTPException(400, "not_pending")
     assigns = [dict(r) for r in c.execute(
