@@ -6,6 +6,12 @@ from app import seed
 from app.db import connect
 from app.engines.rota import build_week_slots, swap_legal, apply_swap
 
+# 对调单状态口径前后端共用这三个字面值；是否过期以库内 status 标记为准，
+# 不看确认时刻的时钟（过期只能由显式 expire 动作落库）。
+SWAP_PENDING = "pending"
+SWAP_CONFIRMED = "confirmed"
+SWAP_EXPIRED = "expired"
+
 app = FastAPI(title="Chorerota", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
@@ -86,20 +92,39 @@ def request_swap(week_id: int, body: SwapBody):
         c.close(); raise HTTPException(400, check["reason"])
     cur = c.execute(
         "INSERT INTO swap_requests(week_id,a_day,a_task,b_day,b_task,status,note) VALUES (?,?,?,?,?,?,?)",
-        (week_id, body.a_day, body.a_task, body.b_day, body.b_task, "pending", body.note))
+        (week_id, body.a_day, body.a_task, body.b_day, body.b_task, SWAP_PENDING, body.note))
     c.commit(); sid = cur.lastrowid; c.close()
-    return {"id": sid, "status": "pending", **check}
+    return {"id": sid, "status": SWAP_PENDING, **check}
 
 @app.get("/api/swaps")
 def list_swaps():
     c = connect(); rows = [dict(r) for r in c.execute("SELECT * FROM swap_requests ORDER BY id DESC")]; c.close(); return rows
+
+@app.post("/api/swaps/{swap_id}/expire")
+def expire_swap(swap_id: int):
+    """把 pending 单标记为库内过期；非 pending（已确认/已过期）一律 400，不允许改状态。"""
+    c = connect()
+    sw = c.execute("SELECT * FROM swap_requests WHERE id=?", (swap_id,)).fetchone()
+    if not sw: c.close(); raise HTTPException(404, "swap not found")
+    if sw["status"] == SWAP_EXPIRED:
+        c.close(); raise HTTPException(400, "already_expired")
+    if sw["status"] != SWAP_PENDING:
+        c.close(); raise HTTPException(400, "not_pending")
+    c.execute("UPDATE swap_requests SET status=? WHERE id=?", (SWAP_EXPIRED, swap_id))
+    c.commit(); c.close()
+    return {"ok": True, "swap_id": swap_id, "status": SWAP_EXPIRED}
 
 @app.post("/api/swaps/{swap_id}/confirm")
 def confirm_swap(swap_id: int):
     c = connect()
     sw = c.execute("SELECT * FROM swap_requests WHERE id=?", (swap_id,)).fetchone()
     if not sw: c.close(); raise HTTPException(404, "swap not found")
-    if sw["status"] != "pending":
+    # 门禁只认库内 status 标记：expired 永远不可确认；confirmed 再来一次同样拒绝（幂等）。
+    if sw["status"] == SWAP_EXPIRED:
+        c.close(); raise HTTPException(400, "expired")
+    if sw["status"] == SWAP_CONFIRMED:
+        c.close(); raise HTTPException(400, "already_confirmed")
+    if sw["status"] != SWAP_PENDING:
         c.close(); raise HTTPException(400, "not_pending")
     assigns = [dict(r) for r in c.execute(
         "SELECT id,day,task_id,member_id FROM assignments WHERE week_id=?", (sw["week_id"],))]
@@ -110,7 +135,7 @@ def confirm_swap(swap_id: int):
         c.close(); raise HTTPException(400, str(e))
     for a, s in zip(assigns, new_slots):
         c.execute("UPDATE assignments SET member_id=? WHERE id=?", (s["member_id"], a["id"]))
-    c.execute("UPDATE swap_requests SET status='confirmed' WHERE id=?", (swap_id,))
+    c.execute("UPDATE swap_requests SET status=? WHERE id=?", (SWAP_CONFIRMED, swap_id))
     c.commit(); c.close()
     return {"ok": True, "swap_id": swap_id}
 
